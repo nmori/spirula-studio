@@ -7,6 +7,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -50,7 +51,12 @@ public:
     // Override with SS_VK_DEVICE=<index|name substring>.
     static Context& get();
 
-    bool ok() const { return _device != VK_NULL_HANDLE; }
+    // False after device loss as well: once a TDR has reset the GPU, further
+    // submits crash inside some drivers instead of failing.
+    bool ok() const { return _device != VK_NULL_HANDLE && !_lost.load(); }
+    bool lost() const { return _lost.load(); }
+    // Records VK_ERROR_DEVICE_LOST. The error replaces any earlier sticky one.
+    void mark_lost();
 
     VkInstance instance() const { return _instance; }
     VkPhysicalDevice physical() const { return _physical; }
@@ -69,6 +75,10 @@ public:
     // spin-polls vkGetSemaphoreCounterValue briefly before falling back to
     // the (slower) blocking vkWaitSemaphores.
     bool wait(uint64_t value);
+
+    // The highest timeline value the device has finished, without blocking;
+    // 0 when it cannot be read.
+    uint64_t completed() const;
 
     // Last value handed out by submit(). wait(last_submitted()) is a full
     // device sync for work submitted through this context.
@@ -103,6 +113,7 @@ private:
     VkSemaphore _timeline = VK_NULL_HANDLE;
     uint64_t _last_value = 0;
     bool _poll_waits = false;
+    std::atomic<bool> _lost{false};
     std::mutex _submit_mutex;
     Capabilities _caps;
     std::string _device_name;

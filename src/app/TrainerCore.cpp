@@ -73,7 +73,8 @@ static void remove_tree(const std::filesystem::path& p) {
              return ::remove(f);
          }, 16, FTW_DEPTH | FTW_PHYS);
 #else
-    std::filesystem::remove_all(p);
+    std::error_code ec;   // best effort, as nftw is above
+    std::filesystem::remove_all(p, ec);
 #endif
 }
 
@@ -1135,7 +1136,14 @@ void TrainerSession::setup_engine() {
     log(lfmt(lmsg::output_directory, {fs::absolute(out_dir).string()}));
 
     // ---- Engine setup -------------------------------------------------
+    if (backend::device_lost())
+        throw std::runtime_error(
+            "GPU device lost by an earlier run; restart Spirula Studio to "
+            "use the GPU again");
     engine_reset();
+    // Whatever an earlier run, a viewer or a save left in the sticky error
+    // is not this run's, and would otherwise fail it at step 0.
+    (void)backend::last_error();
 
     ColorResolution color = resolve_color(cfg);
     SeedSplats seed = seed_world(color);
@@ -1429,7 +1437,14 @@ void TrainerSession::save_checkpoint(int step) {
     std::snprintf(name, sizeof name, "step-%09d.ckpt", step);
     fs::path ckpt = out_dir / name;
     fs::create_directories(ckpt);
-    engine_save_checkpoint(ckpt.string(), cfg.save_full_checkpoint, step);
+    try {
+        engine_save_checkpoint(ckpt.string(), cfg.save_full_checkpoint, step);
+    } catch (...) {
+        // The older checkpoints stay: they are the only good ones left, and
+        // resume takes the newest directory it finds.
+        remove_tree(ckpt);
+        throw;
+    }
     if (cfg.save_only_latest_checkpoint) {
         std::vector<fs::path> stale;
         for (const auto& e : fs::directory_iterator(out_dir)) {
@@ -1457,6 +1472,11 @@ std::map<std::string, float> TrainerSession::train_step(int step) {
     if (const char* err = backend::last_error())
         throw std::runtime_error("GPU backend error at step " +
                                  std::to_string(step) + ": " + err);
+    // A viewer thread may have read (and cleared) the error first.
+    if (backend::device_lost())
+        throw std::runtime_error("GPU device lost at step " +
+                                 std::to_string(step) +
+                                 "; restart Spirula Studio to use the GPU again");
 
     // Divergence never recovers, and the run otherwise continues in silence to
     // a black render and a checkpoint with zero splats. Reported values sit
@@ -1540,6 +1560,18 @@ void TrainerSession::observe_memory(int step, int64_t splats_ran) {
     m.total_bytes = mu.total_bytes;
     _forecast.add_memory(m);
 
+    // Densify runs on this thread, so the engine reads the new ceiling at its
+    // next step without a lock. Logged when it first bites.
+    const int64_t ceiling = _forecast.splat_ceiling();
+    if (ceiling > 0 && ceiling != _splat_ceiling) {
+        engine_set_splat_ceiling(ceiling);
+        _forecast.set_applied_ceiling(ceiling);
+        const int64_t cap = engine_get_max_num_splats();
+        if (ceiling < cap && (_splat_ceiling == 0 || _splat_ceiling >= cap))
+            log(lfmt(lmsg::vram_splat_ceiling, {(long long)ceiling, (long long)cap}));
+        _splat_ceiling = ceiling;
+    }
+
     // Once per level, so a run that stays at risk says it once.
     const VramForecast v = _forecast.vram(false);
     if (!v.valid || (int)v.risk <= (int)_warned_risk) return;
@@ -1576,6 +1608,8 @@ void TrainerSession::train(const TrainerCallbacks& cb) {
         _forecast.reset(fs);
         _live_splats = engine_get_cur_num_splats();
         _warned_risk = OomRisk::Low;
+        _splat_ceiling = 0;
+        engine_set_splat_ceiling(INT64_MAX);
     }
 
     int step = start_step;

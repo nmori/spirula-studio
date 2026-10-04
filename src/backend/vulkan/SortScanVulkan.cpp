@@ -30,8 +30,11 @@ struct GrowBuffer {
     void* acquire(size_t bytes) {
         if (bytes > cap) {
             if (ptr) device_free(ptr);  // syncs in-flight work per contract
-            ptr = device_malloc(bytes);
-            cap = ptr ? bytes : 0;
+            ptr = nullptr;
+            cap = 0;
+            // A null scratch address reaches the shader as a GPU fault.
+            ptr = device_malloc_checked(bytes, "sort scratch");
+            cap = bytes;
         }
         return ptr;
     }

@@ -97,3 +97,15 @@ warning the first time the risk reaches each of medium and high.
 On the three runs, from the first densify step on, the projected peak stayed
 within 2 sigma or above the truth, by at most 8% (bonsai 1/4), 10% (bonsai
 1/2) and 36% (garden) of it.
+
+## Splat ceiling
+
+The same growth fit also gives the largest count whose peak still fits:
+`(0.95 * device - others - 2 sigma(others) - fixed - g0) / (1.25 * g1)`,
+never below the count already trained. `TrainerSession::observe_memory`
+hands it to the engine (`engine_set_splat_ceiling`), densify grows no
+further, and the projections follow the capped schedule from then on. It
+starts with the fit, after the first densify step. On Windows this replaces
+what would otherwise happen past the budget: WDDM pages VRAM out to system
+memory and the whole desktop crawls. The 5% and 25% margins are judgement,
+not measurement; `train_forecast_test` checks the ceiling on a synthetic run.

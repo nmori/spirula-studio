@@ -126,6 +126,11 @@ constexpr double kMemDrift = 0.02;     // [g0, g1] drift, per window
 constexpr double kChunkSigma = 0.5;    // prior sigmas, as shares of the growth
 constexpr double kPerSplatSigma = 0.7;
 constexpr double kReach = 0.3;         // extra sigma per e-fold of extrapolation
+// The splat ceiling leaves 5% of the device to the desktop and fragmentation,
+// and reads the per-splat growth 25% high. Neither is measured: they trade a
+// slightly smaller model for not paging VRAM out to system memory.
+constexpr double kCeilingShare = 0.95;
+constexpr double kCeilingMargin = 1.25;
 
 }  // namespace
 
@@ -170,6 +175,7 @@ void TrainForecast::reset(const ForecastSetup& s) {
     _mem_init = false;
     _demand_sd = 0.0;
     _ours_hw = _grow_hw = 0.0;
+    _ceiling = _applied_ceiling = 0;
     _history.clear();
     _projection.clear();
     _history_stride = 1;
@@ -278,7 +284,7 @@ void TrainForecast::add_save(double seconds, int64_t splats) {
 EtaForecast TrainForecast::eta(int next_step, int64_t live) const {
     std::lock_guard<std::mutex> lk(_mu);
     EtaForecast out;
-    const SplatSchedule& sch = _setup.schedule;
+    const SplatSchedule sch = _setup.schedule.capped(_applied_ceiling);
     const int T = sch.total_steps();
     if (next_step >= T) { out.seconds = out.sigma = 0.0; return out; }
 
@@ -427,18 +433,18 @@ void TrainForecast::refresh_vram(const MemorySample& m) {
     }
 
     const double fixed = ours - (v.category[sxi] + v.scratch);
-    const SplatSchedule& sch = _setup.schedule;
+    const SplatSchedule& full = _setup.schedule;
     const int next = m.step + 1;
-    const int first = sch.first_densify(_setup.start_step);
+    const int first = full.first_densify(_setup.start_step);
     v.provisional = first >= next;
     const double extra_mean =
         v.provisional ? kFirstDensifySplatShare * v.category[(int)VramCategory::Splat] : 0.0;
     const double extra_sd =
         v.provisional ? kFirstDensifySplatSigma * v.category[(int)VramCategory::Splat] : 0.0;
 
-    if (next >= sch.total_steps() || m.splats_ran <= 0 || _grow_hw <= 0.0) {
+    if (next >= full.total_steps() || m.splats_ran <= 0 || _grow_hw <= 0.0) {
         v.peak_mean = _ours_hw;
-        v.valid = next >= sch.total_steps();
+        v.valid = next >= full.total_steps();
         _projection.clear();
         _vram = std::move(v);
         return;
@@ -454,6 +460,17 @@ void TrainForecast::refresh_vram(const MemorySample& m) {
         G[0][0] = G[0][1] = G[1][0] = 0.0;
         G[1][1] = (kPerSplatSigma * g[1]) * (kPerSplatSigma * g[1]);
     }
+
+    // Only once the fit has started: before the first densify step the
+    // splat x img growth reads far too small (10 against 55 MiB on garden).
+    if (_mem_init && v.total_bytes > 0.0 && g[1] > 0.0) {
+        const double room = kCeilingShare * v.total_bytes - v.others_bytes -
+                            2.0 * v.others_sigma - fixed - g[0];
+        const double fit = std::max(0.0, room) / (g[1] * kCeilingMargin) * 1e6;
+        _ceiling = std::max<int64_t>(m.splats_next,
+                                     (int64_t)std::min(fit, 9.0e18));
+    }
+    const SplatSchedule sch = full.capped(_applied_ceiling);
 
     const double C = std::max(1, _setup.distinct_batches);
     const double seen = expected_max(std::min<double>(_window_len, C));
@@ -505,6 +522,16 @@ void TrainForecast::refresh_vram(const MemorySample& m) {
     _projection.swap(v.projection);
     v.projection.clear();
     _vram = std::move(v);
+}
+
+int64_t TrainForecast::splat_ceiling() const {
+    std::lock_guard<std::mutex> lk(_mu);
+    return _ceiling;
+}
+
+void TrainForecast::set_applied_ceiling(int64_t ceiling) {
+    std::lock_guard<std::mutex> lk(_mu);
+    _applied_ceiling = ceiling;
 }
 
 VramForecast TrainForecast::vram(bool series) const {

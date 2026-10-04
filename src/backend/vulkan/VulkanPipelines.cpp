@@ -236,6 +236,7 @@ bool dispatch(Stream stream, const char* entry_name, const SpecList& spec,
     if (pipeline == VK_NULL_HANDLE) return false;
 
     StreamImpl* s = stream_impl(stream);
+    std::lock_guard<std::recursive_mutex> rec(record_mutex());
     VkCommandBuffer cb = stream_begin(s);
     if (cb == VK_NULL_HANDLE) return false;
 

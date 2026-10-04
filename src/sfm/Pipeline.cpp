@@ -36,6 +36,7 @@
 #include "sfm/core/Events.h"
 #include "sfm/core/Exif.h"
 #include "sfm/core/Progress.h"
+#include "sfm/core/Threads.h"
 #include "sfm/core/CameraSetup.h"
 #include "sfm/core/FeatureCompaction.h"
 #include "sfm/core/Log.h"
@@ -558,9 +559,7 @@ void calibrateSensorPriorsFrom(TelemetryPriors& priors, const std::vector<Featur
     const unsigned hc = std::thread::hardware_concurrency();
     const int nt = std::max(1, std::min<int>(threads > 0 ? threads : (hc ? (int)hc : 1),
                                              (int)std::max<size_t>(use.size(), 1)));
-    std::vector<std::thread> pool;
-    for (int t = 0; t < nt; t++) pool.emplace_back(worker);
-    for (std::thread& t : pool) t.join();
+    runThreads(nt, [&](int) { worker(); });
     std::vector<PairRotationObs> kept;
     for (size_t k = 0; k < obs.size(); k++)
         if (ok[k]) kept.push_back(obs[k]);

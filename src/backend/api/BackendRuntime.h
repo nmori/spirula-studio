@@ -133,6 +133,10 @@ void* host_malloc_pinned(size_t bytes);  // cudaMallocHost / persistently-mapped
 void  host_free_pinned(void* ptr);
 
 const char* last_error();
+// True once the driver has reset the device. Unlike last_error() this is not
+// cleared by reading it, so another thread consuming the error cannot hide it.
+// Nothing recovers a lost device short of restarting the process.
+bool device_lost();
 
 // --- out-of-memory reporting ---
 // device_malloc returns null on failure (cudaMalloc semantics), and most call

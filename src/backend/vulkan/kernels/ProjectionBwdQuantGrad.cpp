@@ -117,7 +117,7 @@ void launch_projection_qgrad_vk(
         (uint64_t)(packed ? ranges.camera_id_bounds.data_ptr() : nullptr));
     p.camera_ids = or_fallback((uint64_t)(packed ? camera_ids.data_ptr()
                                                  : nullptr));
-    p.aabb = (uint64_t)aabb.data_ptr();
+    p.aabb = or_fallback((uint64_t)aabb.data_ptr());
     if (eval3d) {
         Vanilla3DGUT<0>::ScreenBuffer vsb(
             const_cast<std::vector<DeviceTensorFloatND>&>(v_splats_screen));

@@ -53,7 +53,9 @@ ResolvedCheckpoint resolve_checkpoint(const fs::path& path) {
     if (fs::is_directory(path))
         for (const auto& e : fs::directory_iterator(path)) {
             std::string b = e.path().filename().string();
-            if (b.rfind("step-", 0) == 0 && b.find(".ckpt") != std::string::npos)
+            // No state.tar: a save that died before its rename.
+            if (b.rfind("step-", 0) == 0 && b.find(".ckpt") != std::string::npos &&
+                fs::is_regular_file(e.path() / "state.tar"))
                 ckpts.push_back(e.path());
         }
     if (ckpts.empty())

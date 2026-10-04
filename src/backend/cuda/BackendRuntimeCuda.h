@@ -129,6 +129,9 @@ inline const char* last_error() {
     return err == cudaSuccess ? nullptr : cudaGetErrorString(err);
 }
 
+// A sticky CUDA error already makes every later call fail.
+inline bool device_lost() { return false; }
+
 inline bool is_device_pointer(const void* ptr) {
     if (ptr == nullptr) return false;
     cudaPointerAttributes attr{};

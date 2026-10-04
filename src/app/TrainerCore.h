@@ -347,6 +347,7 @@ private:
     int _batches_per_epoch = 1;
     std::atomic<int64_t> _live_splats{0};
     OomRisk _warned_risk = OomRisk::Low;
+    int64_t _splat_ceiling = 0;            // last one handed to the engine
 };
 
 }  // namespace spirula

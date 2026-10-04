@@ -41,6 +41,7 @@
 #include "sfm/core/Log.h"
 #include "sfm/core/Resume.h"
 #include "sfm/core/PriorSource.h"
+#include "sfm/core/Threads.h"
 #include "sfm/geometry/KnownRotation.h"
 #include "sfm/geometry/TwoView.h"
 #include "i18n/catalog/Sfm.h"
@@ -93,14 +94,7 @@ inline BearingCache precomputeBearings(const std::vector<FeatureSet>& feats,
                 out[k] = cams[i].bearing({feats[i].keypoints[k].x, feats[i].keypoints[k].y});
         }
     };
-    if (nt == 1) {
-        worker();
-        return bc;
-    }
-    std::vector<std::thread> pool;
-    pool.reserve(nt);
-    for (int t = 0; t < nt; t++) pool.emplace_back(worker);
-    for (std::thread& t : pool) t.join();
+    runThreads(nt, [&](int) { worker(); });
     return bc;
 }
 
@@ -178,9 +172,7 @@ inline FocalScore focalInliers(const std::vector<FeatureSet>& feats,
         }
     };
     int nt = threads > 0 ? threads : (int)std::max(1u, std::thread::hardware_concurrency());
-    std::vector<std::thread> pool;
-    for (int t = 0; t < nt; t++) pool.emplace_back(worker);
-    for (std::thread& t : pool) t.join();
+    runThreads(nt, [&](int) { worker(); });
     return {total, periph};
 }
 
@@ -454,9 +446,7 @@ inline FocalVoteReport focalFromEpipolar(const std::vector<FeatureSet>& feats,
         votes.insert(votes.end(), local.begin(), local.end());
     };
     const int nt = threads > 0 ? threads : (int)std::max(1u, std::thread::hardware_concurrency());
-    std::vector<std::thread> pool;
-    for (int t = 0; t < std::max(1, nt); t++) pool.emplace_back(worker);
-    for (std::thread& t : pool) t.join();
+    runThreads(nt, [&](int) { worker(); });
 
     rep.votes = (int)votes.size();
     if (rep.votes < fo.min_votes) return rep;

@@ -173,6 +173,7 @@ void destroy_allocation(const Allocation& a) {
 std::mutex g_stream_mutex;
 std::vector<StreamImpl*> g_streams;  // all live stream contexts
 StreamImpl* g_default_stream = nullptr;
+std::recursive_mutex g_record_mutex;
 
 StreamImpl* create_stream_impl() {
     Context& ctx = Context::get();
@@ -238,6 +239,8 @@ bool staging_init() {
 
 // --- internal API (VulkanInternal.h) ---------------------------------------
 
+std::recursive_mutex& record_mutex() { return g_record_mutex; }
+
 bool resolve_pointer(const void* p, Allocation* alloc, VkDeviceSize* offset,
                      bool* is_device) {
     std::lock_guard<std::mutex> lock(g_alloc_mutex);
@@ -281,6 +284,7 @@ VkCommandBuffer stream_begin(StreamImpl* s) {
 
 uint64_t stream_flush(StreamImpl* s) {
     if (!s) return 0;
+    std::lock_guard<std::recursive_mutex> rec(g_record_mutex);
     if (!s->recording) return s->last_value;
     Context& ctx = Context::get();
     VkCommandBuffer cb = s->cbs[s->cur];
@@ -327,6 +331,7 @@ void host_read_barrier(VkCommandBuffer cb) {
 }
 
 uint64_t flush_all_streams() {
+    std::lock_guard<std::recursive_mutex> rec(g_record_mutex);
     std::vector<StreamImpl*> streams;
     {
         std::lock_guard<std::mutex> lock(g_stream_mutex);
@@ -346,6 +351,13 @@ bool staging_acquire(VkDeviceSize bytes, StagingRegion* out) {
         return false;
     }
     Context& ctx = Context::get();
+    // Values are pushed in submission order, so the finished ones lead. Without
+    // this, unwaited uploads pile up until the ring wraps and every acquire
+    // scans them all.
+    const uint64_t done = ctx.completed();
+    while (!g_staging_reservations.empty() &&
+           g_staging_reservations.front().value <= done)
+        g_staging_reservations.pop_front();
     VkDeviceSize place = g_staging_cursor;
     if (place + bytes > staging_capacity()) place = 0;
     // Retire (in FIFO order) every reservation overlapping the target range.
@@ -415,10 +427,14 @@ namespace {
 template <typename Fn>
 bool record_and_wait(Fn&& fn) {
     StreamImpl* s = stream_impl(kDefaultStream);
-    VkCommandBuffer cb = stream_begin(s);
-    if (cb == VK_NULL_HANDLE) return false;
-    fn(cb);
-    uint64_t value = stream_flush(s);
+    uint64_t value;
+    {
+        std::lock_guard<std::recursive_mutex> rec(g_record_mutex);
+        VkCommandBuffer cb = stream_begin(s);
+        if (cb == VK_NULL_HANDLE) return false;
+        fn(cb);
+        value = stream_flush(s);
+    }
     return Context::get().wait(value);
 }
 
@@ -450,6 +466,13 @@ void* device_malloc(size_t bytes) {
         vk::g_device_allocs[a.base] = a;
     }
     vk::g_device_bytes.fetch_add(a.size, std::memory_order_relaxed);
+    // SS_VK_FILL_NEW=<byte>: fill every new allocation, to make a read of
+    // memory nothing wrote fail the same way on every run.
+    static const int fill = [] {
+        const char* e = spirula::env("VK_FILL_NEW");
+        return e && e[0] ? (int)(std::strtol(e, nullptr, 0) & 0xff) : -1;
+    }();
+    if (fill >= 0) memset_sync((void*)a.base, fill, rounded);
     return (void*)a.base;
 }
 
@@ -527,9 +550,10 @@ bool range_ok(const ResolvedPtr& r, size_t bytes, const char* what) {
     return true;
 }
 
-// Sync H2D from pageable host memory via the staging ring.
-void staged_upload_sync(const ResolvedPtr& dst, const void* src,
-                        size_t bytes) {
+// Pageable H2D: stage chunks; each chunk is submitted (not waited), so the
+// call returns once the data is staged -- the CUDA pageable-copy contract.
+void staged_upload_async(vk::StreamImpl* st, const ResolvedPtr& dst,
+                         const void* src, size_t bytes) {
     std::lock_guard<std::mutex> lock(vk::g_transfer_mutex);
     size_t done = 0;
     while (done < bytes) {
@@ -537,10 +561,17 @@ void staged_upload_sync(const ResolvedPtr& dst, const void* src,
         vk::StagingRegion reg;
         if (!vk::staging_acquire(n, &reg)) return;
         std::memcpy(reg.mapped, (const char*)src + done, n);
-        vk::record_and_wait([&](VkCommandBuffer cb) {
+        uint64_t value;
+        {
+            std::lock_guard<std::recursive_mutex> rec(vk::record_mutex());
+            VkCommandBuffer cb = vk::stream_begin(st);
+            if (cb == VK_NULL_HANDLE) return;
             VkBufferCopy c{reg.offset, dst.offset + done, n};
             vkCmdCopyBuffer(cb, reg.buffer, dst.alloc.buffer, 1, &c);
-        });
+            vk::stream_barrier(cb);
+            value = vk::stream_flush(st);
+        }
+        vk::staging_release(reg, n, value);
         done += n;
     }
 }
@@ -594,6 +625,16 @@ void memcpy_sync(void* dst, const void* src, size_t bytes, MemcpyKind kind) {
     if (src_dev && !range_ok(s, bytes, "memcpy_sync: src range overflow"))
         return;
 
+    // Pageable upload: cudaMemcpy returns once the source is staged, not when
+    // the copy lands, and every later command is queued behind it on the one
+    // queue. Draining first and waiting after stalled the GPU ~9 times a step.
+    if (dst_dev && !src_dev && !s.known) {
+        std::optional<prof::Scope> _pup;
+        if (prof::enabled()) _pup.emplace(prof::H2D, bytes);
+        staged_upload_async(vk::stream_impl(kDefaultStream), d, src, bytes);
+        return;
+    }
+
     // Profiling: attribute the pending-work drain to DEVSYNC so the copy
     // scope below measures pure transfer (the wait() a few lines down is then
     // a no-op). Same scheme as the CUDA backend for comparable numbers.
@@ -622,8 +663,6 @@ void memcpy_sync(void* dst, const void* src, size_t bytes, MemcpyKind kind) {
                 VkBufferCopy c{s.offset, d.offset, bytes};
                 vkCmdCopyBuffer(cb, s.alloc.buffer, d.alloc.buffer, 1, &c);
             });
-        } else {
-            staged_upload_sync(d, src, bytes);
         }
     } else {
         if (d.known) {  // pinned destination
@@ -680,6 +719,7 @@ void memcpy_async(void* dst, const void* src, size_t bytes, MemcpyKind kind,
         if (!range_ok(s, bytes, "memcpy_async: src range overflow") ||
             !range_ok(d, bytes, "memcpy_async: dst range overflow"))
             return;
+        std::lock_guard<std::recursive_mutex> rec(vk::record_mutex());
         VkCommandBuffer cb = vk::stream_begin(st);
         if (cb == VK_NULL_HANDLE) return;
         VkBufferCopy c{s.offset, d.offset, bytes};
@@ -693,6 +733,7 @@ void memcpy_async(void* dst, const void* src, size_t bytes, MemcpyKind kind,
         if (s.known) {  // pinned source: record directly, stays async
             if (!range_ok(s, bytes, "memcpy_async: pinned src overflow"))
                 return;
+            std::lock_guard<std::recursive_mutex> rec(vk::record_mutex());
             VkCommandBuffer cb = vk::stream_begin(st);
             if (cb == VK_NULL_HANDLE) return;
             VkBufferCopy c{s.offset, d.offset, bytes};
@@ -700,26 +741,7 @@ void memcpy_async(void* dst, const void* src, size_t bytes, MemcpyKind kind,
             vk::stream_barrier(cb);
             return;
         }
-        // Pageable source: stage chunks; each chunk is submitted (not
-        // waited), so the call returns once the data is staged — the CUDA
-        // pageable-async contract.
-        std::lock_guard<std::mutex> lock(vk::g_transfer_mutex);
-        size_t done = 0;
-        while (done < bytes) {
-            size_t n =
-                std::min((size_t)vk::staging_max_chunk(), bytes - done);
-            vk::StagingRegion reg;
-            if (!vk::staging_acquire(n, &reg)) return;
-            std::memcpy(reg.mapped, (const char*)src + done, n);
-            VkCommandBuffer cb = vk::stream_begin(st);
-            if (cb == VK_NULL_HANDLE) return;
-            VkBufferCopy c{reg.offset, d.offset + done, n};
-            vkCmdCopyBuffer(cb, reg.buffer, d.alloc.buffer, 1, &c);
-            vk::stream_barrier(cb);
-            uint64_t value = vk::stream_flush(st);
-            vk::staging_release(reg, n, value);
-            done += n;
-        }
+        staged_upload_async(st, d, src, bytes);
         return;
     }
 
@@ -727,6 +749,7 @@ void memcpy_async(void* dst, const void* src, size_t bytes, MemcpyKind kind,
     if (!range_ok(s, bytes, "memcpy_async: src range overflow")) return;
     if (d.known) {  // pinned destination: record directly, stays async
         if (!range_ok(d, bytes, "memcpy_async: pinned dst overflow")) return;
+        std::lock_guard<std::recursive_mutex> rec(vk::record_mutex());
         VkCommandBuffer cb = vk::stream_begin(st);
         if (cb == VK_NULL_HANDLE) return;
         VkBufferCopy c{s.offset, d.offset, bytes};
@@ -769,6 +792,7 @@ void record_fill(const ResolvedPtr& d, size_t bytes, VkDeviceSize fill,
     // submission, so it is a GPU wait and not fill cost: charging it to
     // MEMSET made a free 450 MB/step of zeroing read as 12 s of a 56 s run.
     std::optional<prof::Scope> _pwait;
+    std::lock_guard<std::recursive_mutex> rec(vk::record_mutex());
     if (prof::enabled() && !st->recording) _pwait.emplace(prof::DEVSYNC);
     VkCommandBuffer cb = vk::stream_begin(st);
     _pwait.reset();
@@ -926,6 +950,7 @@ void event_record(Event* event, Stream stream) {
     if (!event) return;
     vk::StreamImpl* st = vk::stream_impl(stream);
     if (!st) return;
+    std::lock_guard<std::recursive_mutex> rec(vk::record_mutex());
     if (event->timing && event->slot >= 0) {
         VkCommandBuffer cb = vk::stream_begin(st);
         if (cb != VK_NULL_HANDLE) {
@@ -952,6 +977,10 @@ void event_destroy(Event* event) {
 
 float event_elapsed_ms(Event* start, Event* end) {
     vk::Context& ctx = vk::Context::get();
+    if (!ctx.ok()) {
+        vk::set_error("event_elapsed_ms: no usable device", VK_SUCCESS);
+        return 0.0f;
+    }
     if (!start || !end || start->slot < 0 || end->slot < 0) {
         vk::set_error("event_elapsed_ms: events not created with timing "
                       "or timestamps unsupported", VK_SUCCESS);
@@ -1029,6 +1058,11 @@ void gpu_ts_resolve() {
     double period = ctx.caps().timestamp_period_ns;
     for (const TsPair& p : g_ts_pending) {
         uint64_t t0 = 0, t1 = 0;
+        if (!ctx.ok()) {
+            query_slot_release(p.qs);
+            query_slot_release(p.qe);
+            continue;
+        }
         VkResult r0 = vkGetQueryPoolResults(
             ctx.device(), g_query_pool, p.qs, 1, sizeof(uint64_t), &t0,
             sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);

@@ -648,8 +648,19 @@ Context::~Context() {
     if (_instance != VK_NULL_HANDLE) vkDestroyInstance(_instance, nullptr);
 }
 
+void Context::mark_lost() {
+    _lost.store(true);
+    std::lock_guard<std::mutex> lock(g_error_mutex);
+    g_error = "GPU device lost (VkResult -4): the driver reset the GPU. "
+              "Restart Spirula Studio before running anything else on it";
+}
+
 uint64_t Context::submit(VkCommandBuffer cb) {
     std::lock_guard<std::mutex> lock(_submit_mutex);
+    if (_lost.load()) {
+        mark_lost();
+        return 0;
+    }
     uint64_t value = _last_value + 1;
 
     VkTimelineSemaphoreSubmitInfo tsi{
@@ -665,6 +676,10 @@ uint64_t Context::submit(VkCommandBuffer cb) {
     si.pSignalSemaphores = &_timeline;
 
     VkResult r = vkQueueSubmit(_queue, 1, &si, VK_NULL_HANDLE);
+    if (r == VK_ERROR_DEVICE_LOST) {
+        mark_lost();
+        return 0;
+    }
     if (r != VK_SUCCESS) {
         set_error("vkQueueSubmit failed", r);
         return 0;
@@ -675,6 +690,10 @@ uint64_t Context::submit(VkCommandBuffer cb) {
 
 bool Context::wait(uint64_t value) {
     if (value == 0) return true;
+    if (_lost.load()) {
+        mark_lost();
+        return false;
+    }
     // Spin on the counter before the blocking wait to save the park/wake
     // round trip. It cannot replace that wait: reading the counter is a query,
     // not the host domain operation that makes device writes visible.
@@ -685,6 +704,10 @@ bool Context::wait(uint64_t value) {
             uint64_t current = 0;
             VkResult r =
                 vkGetSemaphoreCounterValue(_device, _timeline, &current);
+            if (r == VK_ERROR_DEVICE_LOST) {
+                mark_lost();
+                return false;
+            }
             if (r != VK_SUCCESS) {
                 set_error("vkGetSemaphoreCounterValue failed", r);
                 return false;
@@ -698,11 +721,23 @@ bool Context::wait(uint64_t value) {
     wi.pSemaphores = &_timeline;
     wi.pValues = &value;
     VkResult r = vkWaitSemaphores(_device, &wi, UINT64_MAX);
+    if (r == VK_ERROR_DEVICE_LOST) {
+        mark_lost();
+        return false;
+    }
     if (r != VK_SUCCESS) {
         set_error("vkWaitSemaphores failed", r);
         return false;
     }
     return true;
+}
+
+uint64_t Context::completed() const {
+    if (!ok()) return 0;
+    uint64_t current = 0;
+    if (vkGetSemaphoreCounterValue(_device, _timeline, &current) != VK_SUCCESS)
+        return 0;
+    return current;
 }
 
 uint32_t Context::find_memory_type(uint32_t type_bits,
@@ -824,6 +859,10 @@ int device_resolve(const std::string& selector, bool explicit_set) {
     const sel::Resolution res = sel::resolveRequest(
         sel::requestFrom(selector, explicit_set), vk::enumerate_devices());
     return res.ok() ? res.device.index : -1;
+}
+
+bool device_lost() {
+    return vk::g_context_created.load() && vk::Context::get().lost();
 }
 
 MemoryUsage memory_usage() {

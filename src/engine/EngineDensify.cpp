@@ -38,6 +38,7 @@ static inline DeviceVector<T> _dv_flat(const TorchTensorView& tv) {
 int engine_densify_step(int step, int max_steps, const DensifyConfig& cfg) {
     int64_t cur_num_splats = engine().cur_num_splats;
     int64_t max_num_splats = engine().max_num_splats;
+    const int64_t grow_cap = std::min(max_num_splats, engine().splat_ceiling);
     bool quantize_sh = engine().optim.sh_quantize_enabled();
     const int sh_optim_bits = engine().optim.sh_optim_bits;
     // The 4-bit (joint-nibble) path is wired through both _zero_quant_sh_for_splat
@@ -360,7 +361,7 @@ int engine_densify_step(int step, int max_steps, const DensifyConfig& cfg) {
         );
 
         // Add more splats
-        int64_t n_target = densify_target(cfg, cur_num_splats, max_num_splats);
+        int64_t n_target = densify_target(cfg, cur_num_splats, grow_cap);
         num_added = (int)std::max((int64_t)0, n_target - cur_num_splats);
         if (split_budget > 0)
             num_added = (int)std::max<int64_t>(0, std::min<int64_t>(num_added, split_budget - num_relocated));
@@ -428,7 +429,7 @@ int engine_densify_step(int step, int max_steps, const DensifyConfig& cfg) {
         , engine().region.weight);
 
         // MCMC sample add
-        int64_t n_target = densify_target(cfg, cur_num_splats, max_num_splats);
+        int64_t n_target = densify_target(cfg, cur_num_splats, grow_cap);
         num_added = (int)std::max((int64_t)0, n_target - cur_num_splats);
         if (num_added > 0) {
             add_splats_mcmc_tensor(

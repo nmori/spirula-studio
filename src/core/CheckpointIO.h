@@ -21,6 +21,7 @@
 #include <cstring>
 #include <istream>
 #include <ostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -116,6 +117,8 @@ inline void tar_write_npy_device(std::ostream& out, const std::string& name,
     for (size_t off = 0; off < nbytes; ) {
         size_t n = std::min(CHUNK, nbytes - off);
         backend::memcpy_sync(host.data(), src + off, n, backend::MemcpyKind::DeviceToHost);
+        if (backend::device_lost())
+            throw std::runtime_error("checkpoint save: GPU device lost while reading " + name);
         out.write(host.data(), (std::streamsize)n);
         off += n;
     }
@@ -137,9 +140,12 @@ struct TarMember {
 
 // Index every regular-file member of a ustar stream (no extraction). Handles
 // octal and GNU base-256 size fields. Leaves the stream position undefined.
+// Throws on a member that runs past the end of the stream (a truncated save).
 inline std::vector<TarMember> tar_index(std::istream& in) {
     std::vector<TarMember> members;
     in.clear();
+    in.seekg(0, std::ios::end);
+    const uint64_t end = (uint64_t)in.tellg();
     in.seekg(0, std::ios::beg);
     char h[512];
     while (in.read(h, 512)) {
@@ -153,6 +159,9 @@ inline std::vector<TarMember> tar_index(std::istream& in) {
                 size = size * 8 + (uint64_t)(h[i] - '0');
         }
         uint64_t data_off = (uint64_t)in.tellg();
+        if (data_off > end || size > end - data_off)
+            throw std::runtime_error("checkpoint archive is truncated at member '" +
+                                     name + "'");
         members.push_back({ name, data_off, size });
         uint64_t skip = (size + 511u) & ~((uint64_t)511u);   // pad to 512
         in.seekg((std::streamoff)skip, std::ios::cur);
@@ -166,6 +175,8 @@ inline std::string tar_read_member(std::istream& in, const TarMember& m) {
     in.clear();
     in.seekg((std::streamoff)m.data_offset, std::ios::beg);
     in.read(&s[0], (std::streamsize)m.size);
+    if ((uint64_t)in.gcount() != m.size)
+        throw std::runtime_error("checkpoint archive: short read of '" + m.name + "'");
     return s;
 }
 
@@ -194,6 +205,8 @@ inline NpyInfo npy_locate(std::istream& in, uint64_t npy_start, uint64_t member_
         hlen = (uint8_t)pre[8] | ((uint8_t)pre[9] << 8);
         prefix = 10;
     }
+    if (!in || (uint64_t)prefix + hlen > member_size)
+        throw std::runtime_error("checkpoint archive: corrupt .npy header");
     std::string dict(hlen, '\0');
     in.read(&dict[0], hlen);
     std::string descr;
@@ -222,6 +235,8 @@ inline void read_into_device(std::istream& in, uint64_t offset,
     for (size_t off = 0; off < nbytes; ) {
         size_t n = std::min(CHUNK, nbytes - off);
         in.read(host.data(), (std::streamsize)n);
+        if ((size_t)in.gcount() != n)
+            throw std::runtime_error("checkpoint archive: short read (file truncated?)");
         backend::memcpy_sync(dst + off, host.data(), n, backend::MemcpyKind::HostToDevice);
         off += n;
     }

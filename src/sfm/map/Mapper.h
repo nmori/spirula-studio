@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "sfm/core/Progress.h"
+#include "sfm/core/Threads.h"
 #include "sfm/core/Features.h"
 #include "sfm/core/Model.h"
 #include "sfm/core/PriorSource.h"
@@ -1366,14 +1367,7 @@ public:
             for (size_t i = next++; i < ids.size(); i = next++)
                 hit[i] = poseContradicted(ids[i], alts[i]) ? 1 : 0;
         };
-        if (nt == 1) {
-            worker();
-        } else {
-            std::vector<std::thread> pool;
-            pool.reserve(nt);
-            for (int t = 0; t < nt; t++) pool.emplace_back(worker);
-            for (std::thread& t : pool) t.join();
-        }
+        runThreads(nt, [&](int) { worker(); });
         for (size_t i = 0; i < ids.size(); i++)
             if (hit[i]) repairs.emplace_back(ids[i], alts[i]);
         st.unsupported = (uint32_t)repairs.size();
@@ -3874,14 +3868,10 @@ private:
         const unsigned hc = std::thread::hardware_concurrency();
         const size_t want = opt_.threads > 0 ? (size_t)opt_.threads : std::max(1u, hc);
         const size_t nt = std::min<size_t>(todo.size(), want);
-        std::vector<std::thread> pool;
-        pool.reserve(nt);
-        for (size_t t = 0; t < nt; t++)
-            pool.emplace_back([&] {
-                for (size_t i = next++; i < todo.size(); i = next++)
-                    out[i] = seedGeometry(*todo[i]);
-            });
-        for (std::thread& t : pool) t.join();
+        runThreads((int)nt, [&](int) {
+            for (size_t i = next++; i < todo.size(); i = next++)
+                out[i] = seedGeometry(*todo[i]);
+        });
         for (size_t i = 0; i < todo.size(); i++)
             seed_geom_[{todo[i]->image1, todo[i]->image2}] = std::move(out[i]);
     }
@@ -5608,10 +5598,7 @@ private:
             std::vector<uint8_t> scratch(db_.images.size(), 0);
             for (size_t b; (b = next.fetch_add(block)) < n;) fn(b, std::min(b + block, n), scratch);
         };
-        if (nt == 1) return worker();
-        std::vector<std::thread> pool;
-        for (int t = 0; t < nt; t++) pool.emplace_back(worker);
-        for (std::thread& t : pool) t.join();
+        runThreads(nt, [&](int) { worker(); });
     }
 
     size_t countObservations() const {
@@ -5700,14 +5687,7 @@ private:
             }
             removed_obs_atomic += local_removed;
         };
-        if (nt == 1) {
-            worker(0);
-        } else {
-            std::vector<std::thread> pool;
-            pool.reserve(nt);
-            for (int t = 0; t < nt; t++) pool.emplace_back(worker, t);
-            for (std::thread& t : pool) t.join();
-        }
+        runThreads(nt, worker);
         removedObs += removed_obs_atomic.load();
         for (const std::vector<uint64_t>& d : drop_per_thread)
             drop.insert(drop.end(), d.begin(), d.end());

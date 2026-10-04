@@ -578,6 +578,9 @@ struct EngineState {
     std::string primitive;
     int64_t cur_num_splats = 0;
     int64_t max_num_splats = 0;
+    // Densify grows no further than this: the trainer lowers it to what the
+    // device still has room for (TrainForecast::splat_ceiling).
+    int64_t splat_ceiling  = INT64_MAX;
     int     num_sh         = 0;
     int     sh_degree      = 0;
     bool    packed         = false;

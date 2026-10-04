@@ -76,7 +76,12 @@ bool TrainRunner::paused() const {
 void TrainRunner::request_stop(bool save) {
     if (!_session) return;
     if (!save) _session->save_on_stop = false;
-    _session->stop_requested = true;
+    {
+        // Under the waiter's mutex, or the notify can land between its
+        // predicate check and its sleep and the step loop never wakes.
+        std::lock_guard<std::mutex> lk(_data_mu);
+        _session->stop_requested = true;
+    }
     _data_cv.notify_all();   // the step loop may be parked on a file error
 }
 

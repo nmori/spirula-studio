@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -87,6 +88,7 @@ private:
             limit_ = maxWorkers;
             next_.store(0, std::memory_order_relaxed);
             done_ = 0;
+            error_ = nullptr;
             gen_++;
         }
         cv_.notify_all();
@@ -94,13 +96,22 @@ private:
         std::unique_lock<std::mutex> lk(mu_);
         cv_done_.wait(lk, [&] { return done_ == (int)workers_.size(); });
         job_ = nullptr;
+        // Rethrown only after every worker has left `job`, which lives on the
+        // caller's stack.
+        if (error_) std::rethrow_exception(std::exchange(error_, nullptr));
     }
 
     void drain(int tid) {
         if (tid >= limit_) return;
-        for (int t = next_.fetch_add(1, std::memory_order_relaxed); t < ntasks_;
-             t = next_.fetch_add(1, std::memory_order_relaxed))
-            job_->call(t, tid);
+        try {
+            for (int t = next_.fetch_add(1, std::memory_order_relaxed); t < ntasks_;
+                 t = next_.fetch_add(1, std::memory_order_relaxed))
+                job_->call(t, tid);
+        } catch (...) {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (!error_) error_ = std::current_exception();
+            next_.store(ntasks_, std::memory_order_relaxed);
+        }
     }
 
     void loop(int tid) {
@@ -121,6 +132,7 @@ private:
     std::mutex region_, mu_;
     std::condition_variable cv_, cv_done_;
     const AnyJob* job_ = nullptr;
+    std::exception_ptr error_;
     std::atomic<int> next_{0};
     int ntasks_ = 0, done_ = 0, limit_ = 0;
     uint64_t gen_ = 0;

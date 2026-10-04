@@ -3904,6 +3904,10 @@ bool GuiApp::launch_dataset_job() {
     stop_inference_users();
     close_splat();
     if (!freeze_native_device()) return false;
+    // A reconstruction brings up a Vulkan device of its own and wants the
+    // VRAM the last training run is still holding.
+    detach_session_views();
+    _runner.release_engine();
     app::set_crash_note("building dataset " + _workspace);
     sync_dataset_jobs();
     save_run_stencils();
@@ -7612,6 +7616,9 @@ void GuiApp::start_meshing() {
     _mesh_job.cuda_device = _cuda_device_index;
 #endif
     close_mesh_preview();
+    // The mesh child wants the VRAM the last training run is still holding.
+    detach_session_views();
+    _runner.release_engine();
     _mesh.start(_mesh_job);
 }
 

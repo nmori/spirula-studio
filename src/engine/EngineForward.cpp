@@ -279,6 +279,17 @@ void forward_3dgs(
             throw std::runtime_error("engine_forward: unknown primitive: " + primitive);
         }
 
+        // Nothing in view returns null lists, which the backward launchers
+        // read as the [C, N] layout and index an aabb that does not exist:
+        // the GPU faults or hangs into a TDR. Empty but non-null stays packed.
+        if (cam_ids.data_ptr() == nullptr || gauss_ids.data_ptr() == nullptr) {
+            auto empty = [](PoolSlot slot) {
+                int32_t* p = DevicePool::global().acquire<int32_t>(slot, 1);
+                return DeviceVector<int32_t>(TorchTensorView((uint64_t)p, 4, {0, 1}));
+            };
+            cam_ids = empty(PoolSlot::FwdEmptyCameraIds);
+            gauss_ids = empty(PoolSlot::FwdEmptyGaussianIds);
+        }
         engine().fwd.camera_ids = cam_ids;
         engine().fwd.gaussian_ids = gauss_ids;
         engine().fwd.aabb = vec_to_2d_aabb(aabb_vec);  // [nnz, 1] view for backward

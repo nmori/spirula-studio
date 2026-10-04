@@ -81,6 +81,57 @@ std::string quote_arg(const std::string& a) {
     return out;
 }
 
+// Every child goes in this job, so closing its last handle -- this process
+// exiting, however it exits -- kills the children and their own children.
+HANDLE child_job() {
+    static const HANDLE job = [] {
+        HANDLE j = CreateJobObjectA(nullptr, nullptr);
+        if (!j) return j;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(j, JobObjectExtendedLimitInformation, &li,
+                                     sizeof li)) {
+            CloseHandle(j);
+            return HANDLE(nullptr);
+        }
+        return j;
+    }();
+    return job;
+}
+
+// CreateProcess that inherits only `si`'s std handles. With a bare
+// bInheritHandles=TRUE a child also inherits the pipe ends another thread is
+// setting up for its own child, and that pipe then never reaches EOF.
+BOOL spawn(std::vector<char>& cmd, const char* cwd, DWORD flags,
+           const STARTUPINFOA& si, PROCESS_INFORMATION& pi) {
+    HANDLE list[3];
+    DWORD n = 0;
+    for (HANDLE h : {si.hStdInput, si.hStdOutput, si.hStdError})
+        if (h && h != INVALID_HANDLE_VALUE &&
+            std::find(list, list + n, h) == list + n)
+            list[n++] = h;
+    SIZE_T bytes = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &bytes);
+    std::vector<char> attr_buf(bytes);
+    auto* attrs = (LPPROC_THREAD_ATTRIBUTE_LIST)attr_buf.data();
+    if (!InitializeProcThreadAttributeList(attrs, 1, 0, &bytes)) return FALSE;
+    STARTUPINFOEXA six{};
+    six.StartupInfo = si;
+    six.StartupInfo.cb = sizeof six;
+    if (n && UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                       list, n * sizeof(HANDLE), nullptr, nullptr))
+        six.lpAttributeList = attrs;
+    const BOOL ok = CreateProcessA(
+        nullptr, cmd.data(), nullptr, nullptr, n ? TRUE : FALSE,
+        flags | CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT, nullptr, cwd,
+        &six.StartupInfo, &pi);
+    DeleteProcThreadAttributeList(attrs);
+    if (!ok) return FALSE;
+    if (HANDLE job = child_job()) AssignProcessToJobObject(job, pi.hProcess);
+    ResumeThread(pi.hThread);
+    return TRUE;
+}
+
 }  // namespace
 
 int run_process(const std::vector<std::string>& argv,
@@ -108,9 +159,8 @@ int run_process(const std::vector<std::string>& argv,
     PROCESS_INFORMATION pi{};
     std::vector<char> cmd(cmdline.begin(), cmdline.end());
     cmd.push_back('\0');
-    BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                             CREATE_NO_WINDOW, nullptr,
-                             cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+    BOOL ok = spawn(cmd, cwd.empty() ? nullptr : cwd.c_str(), CREATE_NO_WINDOW,
+                    si, pi);
     CloseHandle(wr);
     if (!ok) { CloseHandle(rd); return kSpawnFailed; }
     CloseHandle(pi.hThread);
@@ -191,9 +241,8 @@ bool ProcessPipe::start(const std::vector<std::string>& argv,
     cmd.push_back('\0');
     // An encoder saturates every core; the window showing its progress
     // must still draw, so it runs a notch below.
-    const BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                                   CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, nullptr,
-                                   nullptr, &si, &pi);
+    const BOOL ok =
+        spawn(cmd, nullptr, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, si, pi);
     CloseHandle(in_rd);
     CloseHandle(out_wr);
     if (!ok) {
@@ -290,8 +339,7 @@ bool ProcessReader::start(const std::vector<std::string>& argv,
     PROCESS_INFORMATION pi{};
     std::vector<char> cmd(cmdline.begin(), cmdline.end());
     cmd.push_back('\0');
-    const BOOL ok = CreateProcessA(nullptr, cmd.data(), nullptr, nullptr, TRUE,
-                                   CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+    const BOOL ok = spawn(cmd, nullptr, CREATE_NO_WINDOW, si, pi);
     CloseHandle(out_wr);
     CloseHandle(err_wr);
     if (!ok) {

@@ -1919,6 +1919,32 @@ SS_MSG(vram_forecast_warn,
        "eğitim için boş: {2} GiB   yetmeme olasılığı: %{3}. --cap-max değerini düşürün "
        "ya da GPU kullanan diğer programları kapatın."));
 
+SS_MSG(vram_splat_ceiling,
+    EN("GPU memory: the model will grow to {0} splats instead of {1}, so training "
+       "stays within the device's memory."),
+    JA("GPU メモリ: 学習が GPU メモリに収まるよう、スプラット数の上限を {1} から {0} "
+       "に抑えます。"),
+    ZH_HANS("显存：为使训练不超出显存，模型将增长到 {0} 个 splat，而不是 {1} 个。"),
+    ZH_HANT("顯示記憶體：為使訓練不超出顯示記憶體，模型將增長到 {0} 個 splat，而不是 {1} 個。"),
+    KO("GPU 메모리: 학습이 GPU 메모리 안에 머물도록 모델을 {1}개 대신 {0}개 "
+       "스플랫까지만 늘립니다."),
+    DE("GPU-Speicher: Das Modell wächst auf {0} statt {1} Splats, damit das Training "
+       "in den Grafikspeicher passt."),
+    FR("Mémoire GPU : le modèle grandira jusqu'à {0} splats au lieu de {1}, pour que "
+       "l'entraînement tienne dans la mémoire du GPU."),
+    ES("Memoria de GPU: el modelo crecerá hasta {0} splats en lugar de {1}, para que "
+       "el entrenamiento quepa en la memoria de la GPU."),
+    PT("Memória de GPU: o modelo crescerá até {0} splats em vez de {1}, para que o "
+       "treinamento caiba na memória da GPU."),
+    IT("Memoria GPU: il modello crescerà fino a {0} splat invece di {1}, così "
+       "l'addestramento resta nella memoria della GPU."),
+    NL("GPU-geheugen: het model groeit tot {0} splats in plaats van {1}, zodat de "
+       "training in het GPU-geheugen past."),
+    RU("Видеопамять: модель вырастет до {0} сплатов вместо {1}, чтобы обучение "
+       "уместилось в памяти GPU."),
+    TR("GPU belleği: eğitimin GPU belleğine sığması için model {1} yerine {0} "
+       "splat'e kadar büyüyecek."));
+
 SS_MSG(partition_applied,
     EN("Partition part {0}: cameras {1} (core {2}, ring {3}), seed points {4}"),
     JA("分割パート {0}: カメラ {1}（コア {2}、リング {3}）、初期点 {4}"),

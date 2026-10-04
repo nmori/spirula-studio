@@ -123,7 +123,8 @@ static void eta_tracks_growth() {
 }
 
 // splat x img follows 60 bytes per splat with per-step spread; the rest is 1 GiB.
-static VramForecast run_vram(double others_gib, int stop_at) {
+static VramForecast run_vram(double others_gib, int stop_at,
+                             int64_t* ceiling = nullptr, int64_t* live = nullptr) {
     const DensifyConfig d = densify(500, 15000, 100, 1.05f);
     const int T = 30000;
     const int64_t cap = 3000000;
@@ -162,7 +163,11 @@ static VramForecast run_vram(double others_gib, int stop_at) {
         m.used_bytes = m.process_bytes + (uint64_t)(others_gib * gib);
         m.total_bytes = (uint64_t)(8.0 * gib);
         fc.add_memory(m);
-        if (s == stop_at) at_stop = fc.vram();
+        if (s == stop_at) {
+            at_stop = fc.vram();
+            if (ceiling) *ceiling = fc.splat_ceiling();
+            if (live) *live = n_at[s + 1];
+        }
     }
     const double truth = gib + (double)hw;
     std::printf("  vram @%d: peak %.3f +- %.3f GiB, truth %.3f GiB, p_oom %.3f\n",
@@ -184,10 +189,29 @@ static void vram_predicts_peak() {
     CHECK(tight.risk >= OomRisk::Medium, "risk %d on a full device", (int)tight.risk);
 }
 
+// 8 GiB device, 1 GiB fixed, 6.3 GiB elsewhere: growth at 60 bytes a splat
+// has room for about two million of the three the schedule wants.
+static void ceiling_fits_device() {
+    int64_t ceiling = 0, live = 0;
+    run_vram(1.0, 2000, &ceiling, &live);
+    CHECK(ceiling > 3000000, "ceiling %lld bites with 6 GiB spare", (long long)ceiling);
+    run_vram(6.3, 2000, &ceiling, &live);
+    CHECK(ceiling > live && ceiling < 3000000, "ceiling %lld, live %lld",
+          (long long)ceiling, (long long)live);
+    const double gib = 1024.0 * 1024.0 * 1024.0;
+    const double peak = gib + 60.0 * 1.25 * (double)ceiling;
+    CHECK(peak + 6.3 * gib <= 0.96 * 8.0 * gib, "ceiling %lld overfills: %.3f GiB",
+          (long long)ceiling, (peak + 6.3 * gib) / gib);
+    run_vram(7.2, 2000, &ceiling, &live);
+    CHECK(ceiling == live, "ceiling %lld on a full device, live %lld",
+          (long long)ceiling, (long long)live);
+}
+
 int main() {
     schedule_matches_engine_rule();
     eta_tracks_growth();
     vram_predicts_peak();
+    ceiling_fits_device();
     if (g_fail) {
         std::printf("train_forecast_test: %d failure(s)\n", g_fail);
         return 1;

@@ -7,6 +7,7 @@
 #include "core/ExrImage.h"
 #include "core/ImageOrient.h"
 #include "core/TiffImage.h"
+#include "data/HostMemory.h"
 #include "data/ImageProbe.h"
 #include "i18n/catalog/Data.h"
 
@@ -897,6 +898,10 @@ private:
     std::unique_ptr<BoundedQueue<DecodeJob>> _q_normal;
     std::unique_ptr<BoundedQueue<std::shared_ptr<TrainStep>>>    _q_ready_train;
     std::unique_ptr<BoundedQueue<std::shared_ptr<DecodedBatch>>> _q_ready_val;
+    // Set by the first next_val_batch(). Until then nothing is staged for
+    // validation: with no consumer the ready queue fills, every decode worker
+    // parks pushing into it, and training starves.
+    std::atomic<bool> _val_wanted{false};
 
     std::vector<std::thread> _workers;
     std::thread              _scheduler;
@@ -948,6 +953,7 @@ private:
     std::vector<IndexGroup> build_index_groups_member(
         const std::vector<int32_t>& flat_indices) const;
     void preload_cpu_cache();
+    uint64_t cpu_cache_bytes() const;
     void allocate_batch(DecodedBatch& b,
                         const IndexGroup& g,
                         const std::vector<int32_t>& ds_indices);
@@ -1163,10 +1169,43 @@ DataManagerImpl::DataManagerImpl(
     }
 
     if (_cfg.cache_mode == CacheMode::CPU) {
+        // The CPU cache holds every decoded image for the whole run; past free
+        // RAM it pages the machine to a crawl instead of failing.
+        const uint64_t need = cpu_cache_bytes();
+        const uint64_t avail = spirula::available_ram_bytes();
+        if (avail > 0 && need > avail / 4 * 3) {
+            auto gib = [](uint64_t b) {
+                char buf[32];
+                std::snprintf(buf, sizeof buf, "%.1f GiB", (double)b / (1ull << 30));
+                return std::string(buf);
+            };
+            std::fprintf(stderr, "%s %s\n", dmsg::word_warning.get(),
+                         format(dmsg::cpu_cache_too_large, {gib(need), gib(avail)}).c_str());
+            std::fflush(stderr);
+            _cfg.cache_mode = CacheMode::DISK;
+        }
+    }
+    if (_cfg.cache_mode == CacheMode::CPU) {
         preload_cpu_cache();
     } else {
         start_disk_pipeline();
     }
+}
+
+uint64_t DataManagerImpl::cpu_cache_bytes() const {
+    uint64_t total = 0;
+    const int64_t N = (int64_t)_image_filenames.size();
+    for (int64_t i = 0; i < N; ++i) {
+        total += (uint64_t)_widths[i] * _heights[i] * 3 * pixel_dtype_size(_rgb_dtype[i]);
+        if (has_masks() && mask_present(i))
+            total += (uint64_t)_mask_w_per[i] * _mask_h_per[i];
+        if (has_depths() && !_depth_filenames[i].empty())
+            total += (uint64_t)_depth_w_per[i] * _depth_h_per[i] *
+                     pixel_dtype_size(_depth_dtype[i]);
+        if (has_normals() && !_normal_filenames[i].empty())
+            total += (uint64_t)_normal_w_per[i] * _normal_h_per[i] * 3;
+    }
+    return total;
 }
 
 DataManagerImpl::~DataManagerImpl() {
@@ -2133,7 +2172,7 @@ void DataManagerImpl::scheduler_loop() {
                 }))
                 return;
         }
-        if (!_val_groups.empty()) {
+        if (!_val_groups.empty() && _val_wanted.load()) {
             if (!stage_or_park([&] {
                     std::unique_lock<std::mutex> lk(_sampling_mu);
                     size_t gi = _val_sampler(_rng);
@@ -2143,6 +2182,8 @@ void DataManagerImpl::scheduler_loop() {
                 }))
                 return;
         }
+        if (_train_groups.empty() && !_val_wanted.load())
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
@@ -2360,6 +2401,7 @@ const DecodedBatch* DataManagerImpl::next_val_batch() {
         return &next_batch_cpu(_cpu_val_batch, _val_groups,
                                _val_sampler, _cfg.val_batch_size);
     }
+    _val_wanted.store(true);
     std::shared_ptr<DecodedBatch> b;
     for (;;) {
         auto r = _q_ready_val->pop_for(b, std::chrono::milliseconds(100));

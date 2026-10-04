@@ -7,6 +7,7 @@
 #include "backend/vulkan/VulkanContext.h"
 
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace backend {
@@ -44,6 +45,11 @@ struct StreamImpl {
     bool recording = false;
     uint64_t last_value = 0;  // last timeline value signaled by this stream
 };
+
+// Held from stream_begin() until the recorded commands are complete (and
+// taken by stream_flush): a command buffer must not be ended or submitted by
+// one thread while another records into it.
+std::recursive_mutex& record_mutex();
 
 // Maps the public handle (nullptr = default stream) to its impl, creating
 // lazily. Returns nullptr only if the context failed to initialize.

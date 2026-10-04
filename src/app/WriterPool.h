@@ -9,8 +9,8 @@
 // and SAM all run on the device, so a caller that writes inline spends a third
 // of every frame with the GPU idle, waiting on zlib.
 //
-// The queue is bounded, so a slow disk still applies back-pressure instead of
-// growing until memory runs out; `submit` blocks when it is full.
+// The queue is bounded in jobs and in bytes (three 8K frames per core would
+// be gigabytes), so a slow disk applies back-pressure; `submit` blocks.
 
 #include "app/DepthPng.h"
 #include "nn/core/Log.h"
@@ -56,8 +56,15 @@ public:
     WriterPool& operator=(const WriterPool&) = delete;
 
     void submit(WriteJob&& job) {
+        const size_t bytes = job_bytes(job);
         std::unique_lock<std::mutex> lk(mu_);
-        space_.wait(lk, [this] { return queue_.size() < limit_; });
+        // Always admitted when nothing is held, so one frame past the byte
+        // bound still goes through.
+        space_.wait(lk, [&] {
+            return queue_.size() < limit_ &&
+                   (held_bytes_ == 0 || held_bytes_ + bytes <= kMaxHeldBytes);
+        });
+        held_bytes_ += bytes;
         queue_.push_back(std::move(job));
         work_.notify_one();
     }
@@ -81,6 +88,13 @@ public:
     int    failures() const { return failures_.load(); }
 
 private:
+    static constexpr size_t kMaxHeldBytes = size_t(1) << 30;
+
+    static size_t job_bytes(const WriteJob& j) {
+        return j.image.data.size() + j.mask.data.size() +
+               j.depth.size() * sizeof(uint16_t);
+    }
+
     void run() {
         while (true) {
             WriteJob job;
@@ -119,6 +133,11 @@ private:
             double expected = busy_ms_.load();
             const double add = nn::now_ms() - t0;
             while (!busy_ms_.compare_exchange_weak(expected, expected + add)) {}
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                held_bytes_ -= job_bytes(job);
+            }
+            space_.notify_all();
         }
     }
 
@@ -127,6 +146,7 @@ private:
     std::mutex               mu_;
     std::condition_variable  work_, space_;
     size_t                   limit_ = 3;
+    size_t                   held_bytes_ = 0;   // queued plus being written
     bool                     done_ = false;
     std::atomic<double>      busy_ms_{0.0};
     std::atomic<int>         failures_{0};

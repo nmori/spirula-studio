@@ -35,6 +35,32 @@ static void _ckpt_mkdir(const fs::path& p) {
     if (ec) throw std::runtime_error("create_directories failed: " + p.string() + " (" + ec.message() + ")");
 }
 
+// Each file is written as <name>.tmp and renamed into place once every byte
+// reached the disk, so a full disk or a crash mid-save never leaves a
+// truncated file that resume would then trust.
+static fs::path _ckpt_tmp(const fs::path& final_path) {
+    return fs::path(final_path.string() + ".tmp");
+}
+
+static void _ckpt_commit(std::ofstream& f, const fs::path& final_path) {
+    const fs::path tmp = _ckpt_tmp(final_path);
+    f.flush();
+    const bool wrote = f.good();
+    f.close();
+    std::error_code ec;
+    if (!wrote || f.fail()) {
+        fs::remove(tmp, ec);
+        throw std::runtime_error("Failed to write " + final_path.string() +
+                                 " (is the disk full?)");
+    }
+    fs::rename(tmp, final_path, ec);
+    if (ec) {
+        fs::remove(tmp, ec);
+        throw std::runtime_error("Failed to move " + tmp.string() + " into place: " +
+                                 ec.message());
+    }
+}
+
 // D->H copy into a freshly sized host buffer.
 template<typename T>
 static std::vector<T> _ckpt_d2h(const T* d_ptr, size_t n) {
@@ -299,7 +325,7 @@ void engine_save_checkpoint(
     const int vertex_floats = 3 + 3 + 3 + 3 * K + 1 + 3 + 4;  // pos + normal + dc + sh + opa + scale + rot
     fs::path ply_path = out_root / "splat.ply";
     {
-        std::ofstream ply(ply_path, std::ios::binary);
+        std::ofstream ply(_ckpt_tmp(ply_path), std::ios::binary);
         if (!ply) throw std::runtime_error("Failed to open PLY for write: " + ply_path.string());
         ply << "ply\n";
         ply << "format binary_little_endian 1.0\n";
@@ -349,13 +375,15 @@ void engine_save_checkpoint(
             if (rows_in_buf == ROWS_PER_FLUSH) flush();
         }
         flush();
+        _ckpt_commit(ply, ply_path);
     }
 
     // --- state.tar: metadata-driven resume payload (see file header) ---------
     // Which buffers to serialize: Always (base) or Always+Resume (full resume).
     const SaveClass save_min = full_dump ? SaveClass::Resume : SaveClass::Always;
 
-    std::ofstream tar((out_root / "state.tar").string(), std::ios::binary);
+    const fs::path tar_path = out_root / "state.tar";
+    std::ofstream tar(_ckpt_tmp(tar_path), std::ios::binary);
     if (!tar)
         throw std::runtime_error("Failed to open state.tar for write: "
                                  + (out_root / "state.tar").string());
@@ -374,6 +402,7 @@ void engine_save_checkpoint(
                                    sl.ptr, sl.nbytes, sl.dtype_tag, host_stage);
     }
     ckpt::tar_finish(tar);
+    _ckpt_commit(tar, tar_path);
 }
 
 

@@ -513,6 +513,7 @@ void engine_read_view_stats(std::vector<float>& cam_sum, std::vector<uint32_t>& 
 
 int64_t engine_get_cur_num_splats();
 int64_t engine_get_max_num_splats();
+void engine_set_splat_ceiling(int64_t ceiling);
 int engine_get_num_sh();   // non-DC SH coefficients per channel
 
 // `out_rgb_raw` is the pre-color-space-conversion render (linear / wide-gamut)

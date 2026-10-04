@@ -35,6 +35,10 @@ int64_t engine_get_max_num_splats() {
     return engine().max_num_splats;
 }
 
+void engine_set_splat_ceiling(int64_t ceiling) {
+    engine().splat_ceiling = ceiling;
+}
+
 int engine_get_num_sh() {
     return engine().num_sh;
 }

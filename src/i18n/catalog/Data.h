@@ -940,6 +940,34 @@ SS_MSG(loading_images,
     RU("Загрузка изображений {0}/{1}"),
     TR("Görüntüler yükleniyor {0}/{1}"));
 
+SS_MSG(cpu_cache_too_large,
+    EN("Caching the decoded images in RAM needs {0}, but only {1} is free. "
+       "Reading them from disk each step instead."),
+    JA("デコード済み画像をRAMにキャッシュするには{0}必要ですが、空きは{1}しか"
+       "ありません。代わりに毎ステップ ディスクから読み込みます。"),
+    ZH_HANS("将解码后的图像缓存到内存需要 {0}，但只有 {1} 可用。"
+            "改为每一步从磁盘读取。"),
+    ZH_HANT("將解碼後的影像快取到記憶體需要 {0}，但只有 {1} 可用。"
+            "改為每一步從磁碟讀取。"),
+    KO("디코딩한 이미지를 RAM에 캐시하려면 {0}이(가) 필요하지만 사용 가능한 "
+       "메모리는 {1}뿐입니다. 대신 매 단계 디스크에서 읽습니다."),
+    DE("Die dekodierten Bilder im RAM zu halten braucht {0}, frei sind aber nur "
+       "{1}. Sie werden stattdessen in jedem Schritt von der Festplatte gelesen."),
+    FR("Garder les images décodées en RAM demande {0}, mais seuls {1} sont "
+       "libres. Elles seront lues depuis le disque à chaque étape."),
+    ES("Guardar las imágenes descodificadas en la RAM requiere {0}, pero solo "
+       "hay {1} libres. Se leerán desde el disco en cada paso."),
+    PT("Manter as imagens decodificadas na RAM exige {0}, mas só há {1} livres. "
+       "Elas serão lidas do disco a cada passo."),
+    IT("Tenere in RAM le immagini decodificate richiede {0}, ma ne sono liberi "
+       "solo {1}. Verranno lette dal disco a ogni passo."),
+    NL("De gedecodeerde beelden in het RAM bewaren vraagt {0}, maar er is maar "
+       "{1} vrij. Ze worden in plaats daarvan elke stap van schijf gelezen."),
+    RU("Для хранения декодированных изображений в ОЗУ нужно {0}, а свободно "
+       "только {1}. Вместо этого они будут читаться с диска на каждом шаге."),
+    TR("Çözülmüş görüntüleri RAM'de tutmak {0} gerektiriyor, ancak yalnızca {1} "
+       "boş. Bunun yerine her adımda diskten okunacak."));
+
 // ===========================================================================
 // Preparing a dataset from a video: the timing table
 // ===========================================================================

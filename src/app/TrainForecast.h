@@ -35,6 +35,12 @@ public:
     int total_steps() const { return _total; }
     int refine_every() const { return _d.refine_every; }
     int64_t cap() const { return _cap; }
+    // The same schedule with growth stopping at `ceiling` (<= 0: unchanged).
+    SplatSchedule capped(int64_t ceiling) const {
+        SplatSchedule s = *this;
+        if (ceiling > 0) s._cap = std::min(_cap, ceiling);
+        return s;
+    }
 
 private:
     DensifyConfig _d;
@@ -114,6 +120,13 @@ public:
     EtaForecast eta(int next_step, int64_t live) const;
     // Without the history and projection series when `series` is false.
     VramForecast vram(bool series = true) const;
+    // The largest splat count whose projected peak still fits on the device
+    // beside everything else on it; 0 until the growth fit has started or when
+    // the device size is unknown. Never below the count already trained.
+    int64_t splat_ceiling() const;
+    // The ceiling the engine now grows to, which the ETA and VRAM projections
+    // then follow (<= 0: the full schedule).
+    void set_applied_ceiling(int64_t ceiling);
 
 private:
     struct Window {
@@ -163,6 +176,7 @@ private:
     double _G[2][2] = {};
     double _demand_sd = 0.0;
     double _ours_hw = 0.0, _grow_hw = 0.0;
+    int64_t _ceiling = 0, _applied_ceiling = 0;
 
     std::vector<VramForecast::Sample> _history;
     std::vector<VramForecast::Band> _projection;
